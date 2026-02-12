@@ -1,0 +1,24 @@
+# 自販機訪問予定表アプリ 設定ファイル
+defaults:
+  origin_address: "千葉県市原市白金町1-32"
+  destination_address: ""  # 空欄の場合は起点と同一
+  departure_time: "09:00"
+  work_minutes: 15
+  lunch_start: "12:00"
+  lunch_end: "13:00"
+  max_today_items: 30
+  max_master_rows: 1000
+
+# Google Maps API Key (環境変数 GOOGLE_MAPS_API_KEY を優先)
+google_maps_api_key: ""
+
+# マスタ列マッピング（桑原マスタ形式）
+master_columns:
+  customer_code: "顧客コード"
+  customer_name: "顧客名称"
+  predicted_sales: "純売上金額"
+  prefecture: "都道府県"
+  city: "市・区"
+  address1: "住所1"
+  latlng: "緯度経度"
+  open_close: "オープン・クローズ"
