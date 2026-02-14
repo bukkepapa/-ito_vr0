@@ -30,14 +30,19 @@ def haversine(lon1, lat1, lon2, lat2):
 def load_customer_data(file):
     try:
         if file.name.endswith('.csv'):
-            # 文字コード自動判別の簡易実装（utf-8-sig -> shift_jis）
+            # 文字コード自動判別の簡易実装（utf-8-sig -> shift_jis -> cp932）
+            # ヘッダーが2行目（index 1）にあると想定
             try:
-                df = pd.read_csv(file, encoding='utf-8-sig')
+                df = pd.read_csv(file, encoding='utf-8-sig', header=1)
             except UnicodeDecodeError:
                 file.seek(0)
-                df = pd.read_csv(file, encoding='shift_jis')
+                try:
+                    df = pd.read_csv(file, encoding='shift_jis', header=1)
+                except UnicodeDecodeError:
+                    file.seek(0)
+                    df = pd.read_csv(file, encoding='cp932', header=1)
         else:
-            df = pd.read_excel(file)
+            df = pd.read_excel(file, header=1)
         
         # 列名マッピング
         col_map = CONFIG['master_columns']
@@ -49,13 +54,16 @@ def load_customer_data(file):
             return None, f"必須列が見つかりません: {', '.join(missing)}"
         
         # 内部処理用にカラム名を統一
-        df = df.rename(columns={
+        rename_map = {
             col_map['customer_code']: 'code',
             col_map['customer_name']: 'name',
             col_map['predicted_sales']: 'sales',
             col_map['latlng']: 'latlng_raw',
-            col_map['address1']: 'address'
-        })
+            col_map['address1']: 'address',
+            col_map.get('work_minutes', '作業時間'): 'WorkMinutes',
+            col_map.get('no_entry_time', '入場不可時間帯'): 'NoEntryTime'
+        }
+        df = df.rename(columns=rename_map)
         
         # 緯度経度の分割
         # "35.534222, 140.111557" -> lat, lng
@@ -77,9 +85,15 @@ def load_customer_data(file):
         else:
             df['sales'] = 0
             
-        # 作業時間がなければデフォルト値適用（後で計算時に使うが、列自体は持たせておく）
-        if 'WorkMinutes' not in df.columns:
+        # 作業時間の欠損処理（configのデフォルト値で埋める）
+        if 'WorkMinutes' in df.columns:
+             df['WorkMinutes'] = pd.to_numeric(df['WorkMinutes'], errors='coerce').fillna(CONFIG['defaults']['work_minutes'])
+        else:
             df['WorkMinutes'] = CONFIG['defaults']['work_minutes']
+            
+        # 入場不可時間帯の欠損処理（空文字にする）
+        if 'NoEntryTime' not in df.columns:
+            df['NoEntryTime'] = None
             
         return df, None
         
@@ -166,13 +180,41 @@ def get_distance_matrix(locations, api_key=None, origin=None):
     return dist_matrix, time_matrix
 
 # ルート最適化（Nearest Insertion + 2-opt）
-def optimize_route(locations, dist_matrix):
+# must_visit_indices: 訪問必須（かつ最初に行く）箇所のインデックスリスト（0オリジン、depot除くindex）
+def optimize_route(locations, dist_matrix, must_visit_indices=None):
     n = len(locations)
     # 0番目は起点（Depot）
-    unvisited = set(range(1, n))
-    route = [0] # Start at depot
     
-    # Nearest Insertion
+    # MUST箇所の処理
+    # MUST箇所を先に訪問するルートを構築
+    # Depot -> Must1 -> Must2 ... -> (Nearest Unvisited)
+    
+    current_node = 0 # Depot
+    visited_must = []
+    
+    if must_visit_indices:
+        # MUST箇所をどう巡るか？
+        # 単純に「リスト順」ではなく、MUST箇所内でも最適化すべきだが、
+        # MUST箇所が少数なら Nearest Neighbor で十分
+        
+        # must_visit_indices は locations のインデックス引数
+        # locations[idx] が対象
+        
+        remaining_must = set(must_visit_indices)
+        
+        while remaining_must:
+            # 現在地から一番近いMUSTを探す
+            nearest_must = min(remaining_must, key=lambda x: dist_matrix[current_node][x])
+            visited_must.append(nearest_must)
+            remaining_must.remove(nearest_must)
+            current_node = nearest_must
+            
+    route = [0] + visited_must
+    
+    # 残りの箇所
+    unvisited = set(range(1, n)) - set(visited_must)
+    
+    # Nearest Neighbor で残りを追加 (Nearest Insertion の簡易版として実装中)
     while unvisited:
         best_node = -1
         best_pos = -1
@@ -196,11 +238,28 @@ def optimize_route(locations, dist_matrix):
         route.append(nearest_node)
         unvisited.remove(nearest_node)
         
-    # 2-opt
+    # 2-opt (MUST箇所の順序は守るべきか？ -> MUSTは「今日の1番目に行く」など順序指定の意味合いが強い
+    # しかし、要件は「この顧客は今日の1番目に行く」という【MUST】設定。
+    # 複数ある場合は「1番目グループ」と解釈し、その中での最適化は許容されるべき。
+    # また、MUSTグループが終わった後に通常グループに行く。
+    # したがって、MUSTグループと通常グループを混ぜてはいけない。
+    
+    # 2-optを「MUSTグループ内」と「通常グループ内」で別々にかけるのが安全。
+    # 今回は簡易的に、全体にかけてしまうとMUSTが後ろに回る可能性があるので、
+    # MUST以降の部分（通常パート）のみに2-optをかける。
+    
+    # must_visit_indices がある場合、その長さ分は固定（Depot(1) + Must(k)）
+    fixed_len = 1 + (len(must_visit_indices) if must_visit_indices else 0)
+    
     improved = True
     while improved:
         improved = False
-        for i in range(1, len(route) - 2):
+        # fixed_len 以降の要素のみ最適化対象
+        start_idx = max(1, fixed_len) 
+        if start_idx >= len(route) - 1:
+            break
+            
+        for i in range(start_idx, len(route) - 2):
             for j in range(i + 1, len(route)):
                 if j - i == 1: continue 
                 # 現在のコスト
@@ -245,6 +304,22 @@ def calculate_schedule(route_indices, df_today, origin_lat, origin_lng, start_ti
         travel_min = int(travel_sec / 60)
         
         arrival_time = current_time + timedelta(minutes=travel_min)
+        
+        # 入場不可時間帯のチェック
+        # NoEntryTime: "12:00-13:00" string or similar
+        no_entry_val = row.get('NoEntryTime')
+        if no_entry_val and isinstance(no_entry_val, str) and '-' in no_entry_val:
+            try:
+                start_str, end_str = no_entry_val.split('-')
+                # 今日の日付と結合
+                ne_start = datetime.strptime(f"{datetime.now().date()} {start_str.strip()}", "%Y-%m-%d %H:%M")
+                ne_end = datetime.strptime(f"{datetime.now().date()} {end_str.strip()}", "%Y-%m-%d %H:%M")
+                
+                # 到着時刻が入場不可時間帯に含まれる場合、終了まで待機
+                if ne_start <= arrival_time < ne_end:
+                    arrival_time = ne_end
+            except:
+                pass # パースエラー時は無視
         
         # 昼休憩判定
         # 到着が昼休憩にかかる -> 休憩終了まで待機

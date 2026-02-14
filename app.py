@@ -58,7 +58,7 @@ work_minutes_def = st.sidebar.number_input("標準作業時間(分)", value=CONF
 lunch_start = st.sidebar.time_input("昼休憩開始", value=datetime.strptime(CONFIG['defaults']['lunch_start'], "%H:%M").time())
 lunch_end = st.sidebar.time_input("昼休憩終了", value=datetime.strptime(CONFIG['defaults']['lunch_end'], "%H:%M").time())
 
-api_key = st.sidebar.text_input("Google Maps API Key", type="password", value=CONFIG['google_maps_api_key'])
+api_key = st.sidebar.text_input("Google Maps API Key", value=CONFIG['google_maps_api_key'])
 
 # メインレイアウト
 st.title("自販機訪問管理表作成アプリ (MVP)")
@@ -95,6 +95,13 @@ with col1:
                 filtered_df['name'].str.contains(search_query)
             ]
         
+        # 並び替え処理
+        sort_option = st.radio("並び替え", ["コード順", "売上見込順"], horizontal=True)
+        if sort_option == "売上見込順":
+            filtered_df = filtered_df.sort_values(by='sales', ascending=False)
+        else:
+            filtered_df = filtered_df.sort_values(by='code', ascending=True)
+        
         # 選択用リスト表示
         # streamlit-sortablesを使うには、リスト形式で渡す必要がある
         # ここではリストから選択して「追加」ボタンで右に移す方式（要件の代替UI）を採用
@@ -116,7 +123,9 @@ with col1:
                         break
                     
                     row = st.session_state['master_df'][st.session_state['master_df']['code'].astype(str) == code].iloc[0]
-                    st.session_state['today_list'].append(row.to_dict())
+                    item_dict = row.to_dict()
+                    item_dict['MUST'] = False # MUSTフラグ初期化
+                    st.session_state['today_list'].append(item_dict)
                     added_count += 1
             
             if added_count > 0:
@@ -126,38 +135,56 @@ with col1:
 with col2:
     st.header("② TODAYリスト")
     
-    total_sales = sum([item['sales'] for item in st.session_state['today_list']])
+    if st.session_state['today_list']:
+        st.write(f"Debug: first item sales = {st.session_state['today_list'][0].get('sales')} type={type(st.session_state['today_list'][0].get('sales'))}")
+        # st.write(st.session_state['today_list'])
+    
+    total_sales = sum([int(item.get('sales', 0)) for item in st.session_state['today_list']])
     st.metric("合計売上見込", f"¥{total_sales:,}")
     
     if st.session_state['today_list']:
-        # Sortablesによる並び替え
-        # 表示用リスト作成
-        today_items_display = [
-            f"{item['code']} : {item['name']} (¥{item['sales']:,})" 
-            for item in st.session_state['today_list']
-        ]
+        # リスト編集機能（data_editor）
+        df_today = pd.DataFrame(st.session_state['today_list'])
         
-        sorted_items_display = sort_items(today_items_display, direction='vertical')
+        # 列の並び順と表示設定
+        # 必須列があるか確認
+        if 'MUST' not in df_today.columns:
+            df_today['MUST'] = False
+            
+        # 表示したい列を定義
+        display_cols = ['MUST', 'code', 'name', 'sales', 'WorkMinutes', 'NoEntryTime', 'address', 'lat', 'lng']
+        # 存在しない列は除外
+        display_cols = [c for c in display_cols if c in df_today.columns]
         
-        # 並び替え結果を反映
-        # 表示文字列から元の辞書リストを復元（順序を同期）
-        new_today_list = []
-        for disp_str in sorted_items_display:
-            # コードでマッチング（コードは一意前提）
-            code = disp_str.split(' : ')[0]
-            # 元のリストから検索
-            original_item = next((item for item in st.session_state['today_list'] if str(item['code']) == code), None)
-            if original_item:
-                new_today_list.append(original_item)
-        
-        st.session_state['today_list'] = new_today_list
+        st.info("作業時間を編集できます")
 
-        # 削除ボタン（全部消す or 末尾消すなど。個別の削除はSortablesだと難しいので、ここでは「全クリア」と「末尾削除」）
-        c1, c2 = st.columns(2)
-        if c1.button("末尾を削除"):
-            st.session_state['today_list'].pop()
-            st.rerun()
-        if c2.button("全クリア"):
+        edited_df = st.data_editor(
+            df_today[display_cols],
+            column_config={
+                "MUST": st.column_config.CheckboxColumn("MUST (First)", help="最初に訪問する", default=False),
+                "code": "コード",
+                "name": "顧客名",
+                "sales": st.column_config.NumberColumn("売上見込", format="¥%d"),
+                "WorkMinutes": st.column_config.NumberColumn("作業時間(分)", min_value=1, step=1, help="作業時間を編集できます"),
+                "NoEntryTime": "入場不可",
+                "address": "住所"
+            },
+            disabled=["code", "name", "sales", "NoEntryTime", "address", "lat", "lng"],
+            hide_index=True,
+            use_container_width=True,
+            key="today_editor"
+        )
+        
+        # 編集結果をsession_stateに反映
+        # 行の削除等はdata_editorでは標準で「削除」機能があるが、ここでは編集結果をそのままリストに戻す
+        # 注意: 削除機能有効化には num_rows="dynamic" が必要
+        
+        # data_editorの結果はDataFrameなので、辞書リストに戻してsession_stateを更新
+        # ただしrerunループを防ぐため、比較する？ -> data_editorは編集時にrerunするので、ここで代入してOK
+        st.session_state['today_list'] = edited_df.to_dict('records')
+
+        # 削除ボタン（一括削除など）
+        if st.button("全クリア"):
             st.session_state['today_list'] = []
             st.rerun()
 
@@ -187,9 +214,17 @@ with col_a:
                 # 距離行列
                 dist_matrix, _ = get_distance_matrix(locations, api_key=api_key)
                 
+                # MUSTフラグが立っている箇所のインデックスを取得
+                # locations[0] は起点なので、locations[i+1] が today_list[i] に対応
+                # optimize_route に渡す must_visit_indices は locations のインデックス（1オリジン）
+                must_indices = []
+                for idx, item in enumerate(st.session_state['today_list']):
+                    if item.get('MUST', False):
+                        must_indices.append(idx + 1) # locationsにおけるインデックス
+                
                 # 最適化（2-opt）
                 # route_indicesは locations のインデックス（1オリジン、0は起点）
-                optimized_indices = optimize_route(locations, dist_matrix)
+                optimized_indices = optimize_route(locations, dist_matrix, must_visit_indices=must_indices)
                 
                 # 結果をTODAYリストに反映
                 # optimized_indices は [3, 1, 2, ...] のような順序（locationsのインデックス）

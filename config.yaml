@@ -16,9 +16,11 @@ google_maps_api_key: ""
 master_columns:
   customer_code: "顧客コード"
   customer_name: "顧客名称"
-  predicted_sales: "純売上金額"
+  predicted_sales: "売上見込"  # Changed from "純売上金額"
   prefecture: "都道府県"
   city: "市・区"
   address1: "住所1"
   latlng: "緯度経度"
   open_close: "オープン・クローズ"
+  work_minutes: "作業時間"      # New
+  no_entry_time: "入場不可時間帯" # New
