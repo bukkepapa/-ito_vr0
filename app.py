@@ -174,10 +174,6 @@ with col1:
 with col2:
     st.header("② TODAYリスト")
     
-
-    total_sales = sum([int(item.get('sales', 0)) for item in st.session_state['today_list']])
-    st.metric("合計売上見込", f"¥{total_sales:,}")
-    
     if st.session_state['today_list']:
         # リスト編集機能（data_editor）
         df_today = pd.DataFrame(st.session_state['today_list'])
@@ -224,6 +220,11 @@ with col2:
             st.session_state['today_list'] = []
             st.session_state['sort_performed'] = False
             st.rerun()
+    
+    # 合計売上見込の計算（data_editor反映後に計算）
+    total_sales = sum([int(item.get('sales', 0)) for item in st.session_state['today_list']])
+    st.metric("合計売上見込", f"¥{total_sales:,}")
+
 
 # アクションエリア
 st.markdown("---")
