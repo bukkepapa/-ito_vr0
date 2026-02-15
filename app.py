@@ -15,16 +15,59 @@ st.markdown("""
 <style>
     .stButton>button {
         width: 100%;
+        transition: all 0.2s ease-in-out;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 0.5rem 1rem;
+        background-color: white;
+    }
+    .stButton>button:hover {
+        border-color: #4CAF50;
+        color: #4CAF50;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        transform: translateY(-1px);
+    }
+    .stButton>button:active {
+        transform: scale(0.97);
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    /* Primary Button Styling */
+    .stButton>button[kind="primary"] {
+        background-color: #ff4b4b;
+        color: white;
+        border: none;
+    }
+    .stButton>button[kind="primary"]:hover {
+        background-color: #ff3333;
+        color: white;
+        box-shadow: 0 4px 15px rgba(255, 75, 75, 0.4);
+    }
+    .stButton>button[kind="primary"]:active {
+        background-color: #e60000;
+        transform: scale(0.97);
     }
     .metric-card {
         background-color: #f0f2f6;
-        padding: 10px;
-        border-radius: 5px;
+        padding: 15px;
+        border-radius: 10px;
         margin-bottom: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
     div[data-testid="stExpander"] div[role="button"] p {
         font-size: 1.1rem;
         font-weight: bold;
+    }
+    @keyframes pulse {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.02); }
+        100% { transform: scale(1); }
+    }
+    .pulse-btn div[data-testid="stButton"] button {
+        animation: pulse 1.5s infinite;
+        border-color: #4CAF50 !important;
+        background-color: #f1f8e9 !important;
+        box-shadow: 0 0 15px rgba(76, 175, 80, 0.4) !important;
+        font-weight: bold !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -43,6 +86,8 @@ if 'today_list' not in st.session_state:
     st.session_state['today_list'] = [] # list of dicts
 if 'optimized_route' not in st.session_state:
     st.session_state['optimized_route'] = [] # list of dicts (customer data)
+if 'sort_performed' not in st.session_state:
+    st.session_state['sort_performed'] = False
 
 # サイドバー設定
 st.sidebar.title("設定")
@@ -58,7 +103,7 @@ work_minutes_def = st.sidebar.number_input("標準作業時間(分)", value=CONF
 lunch_start = st.sidebar.time_input("昼休憩開始", value=datetime.strptime(CONFIG['defaults']['lunch_start'], "%H:%M").time())
 lunch_end = st.sidebar.time_input("昼休憩終了", value=datetime.strptime(CONFIG['defaults']['lunch_end'], "%H:%M").time())
 
-api_key = st.sidebar.text_input("Google Maps API Key", value=CONFIG['google_maps_api_key'])
+api_key = st.sidebar.text_input("G-Maps 認証情報", value=CONFIG['google_maps_api_key'], help="Google Maps APIキーを入力してください")
 
 # メインレイアウト
 st.title("自販機訪問管理表作成アプリ (MVP)")
@@ -86,14 +131,7 @@ with col1:
         # リスト欄が狭いという要望に対応し、データフレームを表示して視認性を高める
         st.dataframe(st.session_state['master_df'], height=300)
         
-        search_query = st.text_input("検索 (コード/名称)", "")
-        
         filtered_df = st.session_state['master_df'].copy()
-        if search_query:
-            filtered_df = filtered_df[
-                filtered_df['code'].astype(str).str.contains(search_query) | 
-                filtered_df['name'].str.contains(search_query)
-            ]
         
         # 並び替え処理
         sort_option = st.radio("並び替え", ["コード順", "売上見込順"], horizontal=True)
@@ -110,7 +148,7 @@ with col1:
         # マルチセレクトで代用（検索と相性が良い）
         # 表示名を工夫: "コード : 名称 (¥売上)"
         options = filtered_df.apply(lambda x: f"{x['code']} : {x['name']} (¥{x['sales']:,})", axis=1).tolist()
-        selected_items = st.multiselect("訪問先を選択", options)
+        selected_items = st.multiselect("訪問候補の選択", options, placeholder="ここから追加したい顧客を選択してください")
         
         if st.button("TODAYリストへ追加"):
             current_codes = [item['code'] for item in st.session_state['today_list']]
@@ -129,16 +167,14 @@ with col1:
                     added_count += 1
             
             if added_count > 0:
+                st.session_state['sort_performed'] = False # リスト変更時は再ソートが必要
                 st.success(f"{added_count}件追加しました。")
                 st.rerun()
 
 with col2:
     st.header("② TODAYリスト")
     
-    if st.session_state['today_list']:
-        st.write(f"Debug: first item sales = {st.session_state['today_list'][0].get('sales')} type={type(st.session_state['today_list'][0].get('sales'))}")
-        # st.write(st.session_state['today_list'])
-    
+
     total_sales = sum([int(item.get('sales', 0)) for item in st.session_state['today_list']])
     st.metric("合計売上見込", f"¥{total_sales:,}")
     
@@ -186,11 +222,15 @@ with col2:
         # 削除ボタン（一括削除など）
         if st.button("全クリア"):
             st.session_state['today_list'] = []
+            st.session_state['sort_performed'] = False
             st.rerun()
 
 # アクションエリア
 st.markdown("---")
 st.header("アクション")
+
+if st.session_state.get('sort_performed'):
+    st.info("💡 **並び替えが完了しました！** 次に右側の **『訪問予定表(Excel)作成』** ボタンをクリックしてファイルを **作成** してください。")
 
 col_a, col_b = st.columns(2)
 
@@ -231,14 +271,20 @@ with col_a:
                 # これを today_list のインデックス（0開始）に変換 -> index - 1
                 new_today_list = [st.session_state['today_list'][i-1] for i in optimized_indices]
                 st.session_state['today_list'] = new_today_list
+                st.session_state['sort_performed'] = True # ソート完了フラグ
                 st.success("最短ルート順に並び替えました！")
                 st.rerun()
 
 with col_b:
+    if st.session_state.get('sort_performed'):
+        st.markdown('<div class="pulse-btn">', unsafe_allow_html=True)
+        
     if st.button("訪問予定表 (Excel) 作成"):
         if not st.session_state['today_list']:
             st.warning("リストが空です")
         else:
+            # フラグをリセット（アニメーション停止）
+            st.session_state['sort_performed'] = False
             # スケジュール計算
             # ここでも起点は仮
             origin_lat, origin_lng = 35.534222, 140.111557
@@ -307,3 +353,6 @@ with col_b:
                 file_name=f"VisitPlan_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
+    if st.session_state.get('sort_performed'):
+        st.markdown('</div>', unsafe_allow_html=True)
